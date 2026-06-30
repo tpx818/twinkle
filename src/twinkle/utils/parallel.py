@@ -1,0 +1,65 @@
+# Copyright (c) ModelScope Contributors. All rights reserved.
+import inspect
+import os
+import re
+from contextlib import contextmanager
+from datasets.utils.filelock import FileLock
+
+os.makedirs('.locks', exist_ok=True)
+
+
+def _sanitize_lock_name(name: str) -> str:
+    r"""Sanitize lock file name for cross-platform compatibility.
+
+    Windows does not allow : / \ * ? " < > | in file names.
+    """
+    # Replace problematic characters with underscores
+    return re.sub(r'[:/\\*?"<>|]', '_', name)
+
+
+def acquire_lock(lock: FileLock, blocking: bool):
+    try:
+        if 'blocking' in inspect.signature(lock.acquire).parameters:
+            lock.acquire(blocking=blocking)
+        else:
+            lock.acquire(timeout=(0 if not blocking else None))
+        return True
+    except TimeoutError:
+        return False
+
+
+def release_lock(lock: FileLock):
+    lock.release(force=True)
+
+
+@contextmanager
+def processing_lock(lock_file: str):
+    """A file lock to prevent parallel operations to one file.
+
+    This lock is specially designed for the scenario that one writing and multiple reading, for example:
+    1. Download model
+    2. Preprocess a dataset and generate cache files
+
+    Firstly, it will try to acquire the lock, only one process will win and do the writing,
+        other processes fall to `acquire_lock(lock, True)`
+
+    After the writing process finishes the job, other processes will acquire and
+        release immediately to do parallel reading.
+
+    Args:
+        lock_file: The lock file.
+    Returns:
+
+    """
+    lock_name = _sanitize_lock_name(lock_file)
+    lock: FileLock = FileLock(os.path.join('.locks', f'{lock_name}.lock'))  # noqa
+
+    if acquire_lock(lock, False):
+        try:
+            yield
+        finally:
+            release_lock(lock)
+    else:
+        acquire_lock(lock, True)
+        release_lock(lock)
+        yield
